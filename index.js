@@ -1,9 +1,13 @@
+'use strict';
 var libs = {
   // communicate with SOCKS (protocol used by tor) over nodejs
   Socks: require('socks'),
 
   // better HTTP for nodejs
   request: require('request'),
+
+  // promises with request hs
+  rp: require('request-promise')
 }
 
 /* Run tor locally (debian example: apt-get install tor)
@@ -43,33 +47,40 @@ function createAgent (url) {
   return socksAgent;
 }
 
-/* wraps around libs.request and attaches a SOCKS Agent into
- * the request.
- * */
-function torRequest (uri, options, callback) {
+
+/**
+ * wraps around libs.request and attaches a SOCKS Agent into
+ * the request-promise.
+ * @param uri
+ * @param options
+ * @param callback
+ * @returns {Promise}
+ */
+function torRequest(uri, options, callback) {
   var params = libs.request.initParams(uri, options, callback);
-  params.agent = createAgent( params.uri || params.url );
+  params.agent = createAgent(params.uri || params.url);
 
-  return libs.request(params, function (err, res, body) {
-    // Connection header by default is keep-alive,
-    // we have to manually end the socket
-    var agent = params.agent;
-    if (agent && agent.encryptedSocket) {
-      agent.encryptedSocket.end();
-    }
-
-    params.callback(err, res, body);
+  return new Promise((resolve, reject) => {
+    libs.rp(params)
+        .then(parsedBody => resolve(parsedBody))
+        .catch(err => reject(err))
+        .then(() => {
+          const agent = params.agent;
+          if (agent && agent.encryptedSocket) {
+            agent.encryptedSocket.end();
+          }
+        });
   });
 }
 
 // bind http through tor-request instead of request
-function verbFunc (verb) {
-  var method = verb === 'del' ? 'DELETE' : verb.toUpperCase();
+function verbFunc(verb) {
+  const method = verb === 'del' ? 'DELETE' : verb.toUpperCase();
   return function (uri, options, callback) {
-    var params = libs.request.initParams(uri, options, callback);
+    const params = libs.rp.initParams(uri, options, callback);
     params.method = method;
     return torRequest(params, params.callback);
-  }
+  };
 }
 
 // create bindings through tor-request for http
@@ -122,37 +133,42 @@ var TorControlPort = {
       done(null, data);
     });
   }
-}
+};
 
 /**
  * send a predefined set of commands to the ControlPort
  * to request a new tor session.
+ * @returns {Promise}
  */
-function renewTorSession (done) {
-  var password = TorControlPort.password || "";
-  var commands = [
-    'authenticate "' + password + '"', // authenticate the connection
-    'signal newnym', // send the signal (renew Tor session)
-    'quit' // close the connection
-  ];
+function renewTorSession () {
+  return new Promise((resolve, reject) => {
 
-  TorControlPort.send(commands, function (err, data) {
-    if (err) {
-      done(err);
-    } else {
-      var lines = data.split( require('os').EOL ).slice(0, -1);
+    const password = TorControlPort.password || "";
+    const commands = [
+      'authenticate "' + password + '"', // authenticate the connection
+      'signal newnym', // send the signal (renew Tor session)
+      'quit' // close the connection
+    ];
 
-      var success = lines.every(function (val, ind, arr) {
-        // each response from the ControlPort should start with 250 (OK STATUS)
-        return val.length <= 0 || val.indexOf('250') >= 0;
-      });
-
-      if (!success) {
-        done( new Error('Error communicating with Tor ControlPort\n' + data) );
-      } else {
-        done(null, "Tor session successfully renewed!!");
+    TorControlPort.send(commands, function (err, data) {
+      if (err) {
+         reject(err);
       }
-    }
+      else {
+        var lines = data.split(require('os').EOL).slice(0, -1);
+
+        var success = lines.every(function (val, ind, arr) {
+          // each response from the ControlPort should start with 250 (OK STATUS)
+          return val.length <= 0 || val.indexOf('250') >= 0;
+        });
+
+        if (!success) {
+          reject(`Error communicating with Tor ControlPort\n ${data}`);
+        } else {
+          resolve('Tor session successfully renewed!!');
+        }
+      }
+    });
   });
 }
 
